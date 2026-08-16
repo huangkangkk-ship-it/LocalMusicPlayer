@@ -1,0 +1,67 @@
+name: APK Reverse Engineering
+
+on:
+  push:
+    branches: [feature/apk-reverse-workflow]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download base.apk from v1.0 Release
+        run: |
+          curl -fL --retry 3 -o base.apk "https://github.com/huangkangkk-ship-it/LocalMusicPlayer/releases/download/v1.0/base.apk"
+          sha256sum base.apk
+          test "$(sha256sum base.apk | cut -d' ' -f1)" = "4e6e705ba2938c78f7f079aebfb6a57d52ee626d896b36827bf20e63aa349f29"
+
+      - name: Download JADX
+        run: |
+          curl -fL --retry 3 -o jadx.zip https://github.com/skylot/jadx/releases/latest/download/jadx.zip
+          unzip -q jadx.zip -d jadx
+
+      - name: Download Apktool
+        run: |
+          curl -fL --retry 3 -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/latest/download/apktool.jar
+
+      - name: Install Android build tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;35.0.0'
+
+      - name: Inspect APK
+        run: |
+          unzip -l base.apk | head -100
+
+      - name: Decode APK with Apktool
+        run: java -jar apktool.jar d base.apk -o decoded --force
+
+      - name: Decompile DEX with JADX
+        run: ./jadx/bin/jadx -d jadx-out base.apk || true
+
+      - name: Locate Tint and white-balance code
+        run: |
+          grep -RniE 'ManualWhiteBalance|manualWhiteBalance|COLOR_CORRECTION_GAINS|COLOR_CORRECTION_TRANSFORM|tint=' decoded jadx-out 2>/dev/null | head -500 > tint-search.txt || true
+          cat tint-search.txt
+
+      - name: Package analysis artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcam-reverse-analysis
+          path: |
+            tint-search.txt
+            jadx-out
+            decoded/smali*
+          retention-days: 7
