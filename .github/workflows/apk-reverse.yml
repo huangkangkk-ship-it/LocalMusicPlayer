@@ -1,0 +1,67 @@
+name: APK Reverse Engineering
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_path:
+        description: 'Path to the APK in the repository'
+        required: true
+        default: 'reverse/base.apk'
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download JADX
+        run: |
+          curl -L -o jadx.zip https://github.com/skylot/jadx/releases/latest/download/jadx.zip
+          unzip -q jadx.zip -d jadx
+
+      - name: Download Apktool
+        run: |
+          curl -L -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/latest/download/apktool.jar
+
+      - name: Install Android build tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;35.0.0'
+
+      - name: Verify input APK
+        run: |
+          test -f "${{ inputs.apk_path }}"
+          sha256sum "${{ inputs.apk_path }}"
+          unzip -l "${{ inputs.apk_path }}" | head -80
+
+      - name: Decode APK with Apktool
+        run: java -jar apktool.jar d "${{ inputs.apk_path }}" -o decoded --force
+
+      - name: Decompile DEX with JADX
+        run: ./jadx/bin/jadx -d jadx-out "${{ inputs.apk_path }}" || true
+
+      - name: Locate Tint and white-balance code
+        run: |
+          grep -RniE 'ManualWhiteBalance|manualWhiteBalance|COLOR_CORRECTION_GAINS|COLOR_CORRECTION_TRANSFORM|tint=' decoded jadx-out 2>/dev/null | head -300 > tint-search.txt || true
+          cat tint-search.txt
+
+      - name: Package analysis artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcam-reverse-analysis
+          path: |
+            tint-search.txt
+            jadx-out
+            decoded/smali*
+          retention-days: 7
