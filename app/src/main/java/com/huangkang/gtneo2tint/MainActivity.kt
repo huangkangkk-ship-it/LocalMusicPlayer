@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.hardware.camera2.*
+import android.hardware.camera2.params.RggbChannelVector
 import android.os.Bundle
 import android.view.Surface
 import android.view.TextureView
