@@ -3,10 +3,10 @@ name: APK Reverse Engineering
 on:
   workflow_dispatch:
     inputs:
-      apk_path:
-        description: 'Path to the APK in the repository'
+      parts_dir:
+        description: 'Directory containing APK parts, e.g. reverse'
         required: true
-        default: 'reverse/base.apk'
+        default: 'reverse'
 
 permissions:
   contents: read
@@ -25,6 +25,24 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Reassemble split APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="${{ inputs.parts_dir }}"
+          mkdir -p "$dir"
+          shopt -s nullglob
+          parts=("$dir"/base.apk.part*)
+          if [ ${#parts[@]} -eq 0 ]; then
+            echo "No APK parts found in $dir"
+            echo "Expected files such as reverse/base.apk.part01, reverse/base.apk.part02, ..."
+            exit 1
+          fi
+          printf '%s\n' "${parts[@]}" | sort -V
+          cat $(printf '%q ' "${parts[@]}" | sort -V) > "$dir/base.apk"
+          echo "Reassembled APK: $(du -h "$dir/base.apk" | cut -f1)"
+          sha256sum "$dir/base.apk"
+
       - name: Download JADX
         run: |
           curl -L -o jadx.zip https://github.com/skylot/jadx/releases/latest/download/jadx.zip
@@ -41,15 +59,15 @@ jobs:
 
       - name: Verify input APK
         run: |
-          test -f "${{ inputs.apk_path }}"
-          sha256sum "${{ inputs.apk_path }}"
-          unzip -l "${{ inputs.apk_path }}" | head -80
+          test -f "${{ inputs.parts_dir }}/base.apk"
+          sha256sum "${{ inputs.parts_dir }}/base.apk"
+          unzip -l "${{ inputs.parts_dir }}/base.apk" | head -80
 
       - name: Decode APK with Apktool
-        run: java -jar apktool.jar d "${{ inputs.apk_path }}" -o decoded --force
+        run: java -jar apktool.jar d "${{ inputs.parts_dir }}/base.apk" -o decoded --force
 
       - name: Decompile DEX with JADX
-        run: ./jadx/bin/jadx -d jadx-out "${{ inputs.apk_path }}" || true
+        run: ./jadx/bin/jadx -d jadx-out "${{ inputs.parts_dir }}/base.apk" || true
 
       - name: Locate Tint and white-balance code
         run: |
