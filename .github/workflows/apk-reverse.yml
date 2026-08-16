@@ -1,6 +1,8 @@
 name: APK Reverse Engineering
 
 on:
+  push:
+    branches: [feature/apk-reverse-workflow]
   workflow_dispatch:
 
 permissions:
