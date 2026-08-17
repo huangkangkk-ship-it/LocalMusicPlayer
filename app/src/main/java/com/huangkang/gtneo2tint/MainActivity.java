@@ -3,7 +3,7 @@ package com.huangkang.gtneo2tint;
 import android.Manifest;
 import android.content.ContentValues;
 import android.content.pm.PackageManager;
-import android.graphics.PointF;
+import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
@@ -12,6 +12,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
@@ -35,6 +36,7 @@ import com.otaliastudios.cameraview.controls.VideoCodec;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.OutputStream;
+import java.util.Locale;
 
 public class MainActivity extends AppCompatActivity {
     private CameraView camera;
@@ -45,38 +47,41 @@ public class MainActivity extends AppCompatActivity {
     private TextView exposureValue;
     private TextView status;
     private TextView zoomValue;
+    private TextView flashValue;
     private Button recordButton;
     private Button flashButton;
     private Button flipButton;
     private Button gridButton;
+    private LinearLayout advancedPanel;
     private boolean recording = false;
     private boolean gridOn = false;
+    private boolean advancedOpen = true;
     private int flashMode = 0;
     private float zoom = 0f;
-    private File pendingVideo;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        getWindow().setStatusBarColor(Color.TRANSPARENT);
+        getWindow().setNavigationBarColor(Color.BLACK);
         buildUi();
         configureCamera();
     }
 
     private void buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(0xFF000000);
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.BLACK);
 
         camera = new CameraView(this);
         camera.setKeepScreenOn(true);
-        root.addView(camera, new LinearLayout.LayoutParams(-1, 0, 1f));
+        root.addView(camera, new FrameLayout.LayoutParams(-1, -1));
 
-        // Tap the preview to perform real Camera2 touch metering / autofocus.
         camera.setOnTouchListener((v, event) -> {
             if (event.getAction() == MotionEvent.ACTION_UP && !recording) {
                 try {
                     camera.startAutoFocus(event.getX(), event.getY());
                     status.setText("对焦中");
+                    status.postDelayed(() -> { if (!recording) status.setText("自动对焦"); }, 900);
                 } catch (Exception e) {
                     status.setText("自动对焦不可用");
                 }
@@ -84,97 +89,124 @@ public class MainActivity extends AppCompatActivity {
             return false;
         });
 
-        LinearLayout controls = new LinearLayout(this);
-        controls.setOrientation(LinearLayout.VERTICAL);
-        controls.setPadding(dp(12), dp(6), dp(12), dp(10));
-        controls.setBackgroundColor(0xFF101010);
-
+        // Subtle top gradient panel.
         LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
         top.setGravity(Gravity.CENTER_VERTICAL);
-        flipButton = smallButton("↺ 镜头");
-        flashButton = smallButton("闪光关");
-        gridButton = smallButton("网格关");
-        top.addView(flipButton, new LinearLayout.LayoutParams(0, dp(42), 1f));
-        top.addView(flashButton, new LinearLayout.LayoutParams(0, dp(42), 1f));
-        top.addView(gridButton, new LinearLayout.LayoutParams(0, dp(42), 1f));
-        controls.addView(top);
+        top.setPadding(dp(16), dp(12), dp(16), dp(10));
+        top.setBackground(gradient(0xCC000000, 0x00000000, true));
 
-        LinearLayout titleRow = new LinearLayout(this);
-        titleRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = label("GT Neo2 Camera", 18);
-        titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
-        status = label("Camera2 · OpenGL", 12);
-        status.setTextColor(0xFFB0B0B0);
-        titleRow.addView(status);
-        controls.addView(titleRow);
+        TextView appTitle = label("GT Neo2  •  VIDEO", 17, Color.WHITE);
+        appTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        top.addView(appTitle, new LinearLayout.LayoutParams(0, dp(42), 1f));
+        status = label("自动对焦", 12, 0xFFE0E0E0);
+        status.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+        top.addView(status, new LinearLayout.LayoutParams(dp(90), dp(42)));
+        root.addView(top, frameTop());
 
-        tintValue = label("Tint  0", 17);
+        // Compact control chips over the preview.
+        LinearLayout chips = new LinearLayout(this);
+        chips.setOrientation(LinearLayout.HORIZONTAL);
+        chips.setGravity(Gravity.CENTER);
+        chips.setPadding(dp(10), dp(4), dp(10), dp(4));
+        flipButton = chip("↺  镜头");
+        flashButton = chip("⚡ 关闭");
+        gridButton = chip("▦  网格");
+        Button advancedButton = chip("☷  参数");
+        chips.addView(flipButton, weightChip());
+        chips.addView(flashButton, weightChip());
+        chips.addView(gridButton, weightChip());
+        chips.addView(advancedButton, weightChip());
+        FrameLayout.LayoutParams chipLp = new FrameLayout.LayoutParams(-1, dp(52));
+        chipLp.gravity = Gravity.TOP;
+        chipLp.topMargin = dp(62);
+        root.addView(chips, chipLp);
+
+        advancedPanel = new LinearLayout(this);
+        advancedPanel.setOrientation(LinearLayout.VERTICAL);
+        advancedPanel.setPadding(dp(16), dp(10), dp(16), dp(8));
+        advancedPanel.setBackground(round(0xDD101114, dp(18)));
+        advancedPanel.addView(parameterHeader("TINT", "绿色  ←  -100                 +100  →  洋红"));
+
+        tintValue = label("0", 14, Color.WHITE);
         tintValue.setGravity(Gravity.CENTER);
-        controls.addView(tintValue);
-        tintBar = new SeekBar(this);
-        tintBar.setMax(200);
-        tintBar.setProgress(100);
-        tintBar.setContentDescription("Tint -100 to +100");
+        advancedPanel.addView(tintValue, new LinearLayout.LayoutParams(-1, dp(24)));
+        tintBar = seek(200, 100);
         tintBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                int value = progress - 100;
-                tintValue.setText("Tint  " + value);
+            @Override public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                int value = p - 100;
+                tintValue.setText("Tint  " + (value > 0 ? "+" : "") + value);
                 if (tintFilter != null) tintFilter.setAmount(value / 100f);
             }
-            @Override public void onStartTrackingTouch(SeekBar seekBar) { }
-            @Override public void onStopTrackingTouch(SeekBar seekBar) { }
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
         });
-        controls.addView(tintBar);
+        advancedPanel.addView(tintBar);
 
-        LinearLayout scale = new LinearLayout(this);
-        TextView green = label("-100 绿", 11);
-        TextView magenta = label("洋红 +100", 11);
-        magenta.setGravity(Gravity.RIGHT);
-        scale.addView(green, new LinearLayout.LayoutParams(0, -2, 1f));
-        scale.addView(magenta, new LinearLayout.LayoutParams(0, -2, 1f));
-        controls.addView(scale);
-
-        exposureValue = label("曝光  0.0 EV", 15);
+        advancedPanel.addView(parameterHeader("EXPOSURE", "暗  ←  EV  →  亮"));
+        exposureValue = label("0.0 EV", 14, Color.WHITE);
         exposureValue.setGravity(Gravity.CENTER);
-        controls.addView(exposureValue);
-        exposureBar = new SeekBar(this);
-        exposureBar.setMax(40);
-        exposureBar.setProgress(20);
-        exposureBar.setContentDescription("Exposure correction");
+        advancedPanel.addView(exposureValue, new LinearLayout.LayoutParams(-1, dp(24)));
+        exposureBar = seek(40, 20);
         exposureBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                float ev = (progress - 20) / 10f;
+            @Override public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                float ev = (p - 20) / 10f;
                 try {
                     camera.setExposureCorrection(ev);
-                    exposureValue.setText(String.format("曝光  %.1f EV", ev));
-                } catch (Exception ignored) { }
+                    exposureValue.setText(String.format(Locale.US, "%+.1f EV", ev));
+                } catch (Exception ignored) {}
             }
-            @Override public void onStartTrackingTouch(SeekBar seekBar) { }
-            @Override public void onStopTrackingTouch(SeekBar seekBar) { }
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
         });
-        controls.addView(exposureBar);
+        advancedPanel.addView(exposureBar);
 
         LinearLayout zoomRow = new LinearLayout(this);
         zoomRow.setGravity(Gravity.CENTER_VERTICAL);
-        Button zoomOut = smallButton("−");
-        zoomValue = label("1.0×", 15);
+        Button zoomOut = chip("−");
+        zoomValue = label("1.0×", 15, Color.WHITE);
         zoomValue.setGravity(Gravity.CENTER);
-        Button zoomIn = smallButton("+");
+        Button zoomIn = chip("+");
         zoomRow.addView(zoomOut, new LinearLayout.LayoutParams(0, dp(42), 1f));
         zoomRow.addView(zoomValue, new LinearLayout.LayoutParams(0, dp(42), 1f));
         zoomRow.addView(zoomIn, new LinearLayout.LayoutParams(0, dp(42), 1f));
-        controls.addView(zoomRow);
+        advancedPanel.addView(zoomRow);
         zoomOut.setOnClickListener(v -> changeZoom(-0.1f));
         zoomIn.setOnClickListener(v -> changeZoom(0.1f));
 
-        recordButton = new Button(this);
-        recordButton.setText("开始录像");
-        recordButton.setTextSize(17);
-        recordButton.setOnClickListener(v -> toggleRecording());
-        controls.addView(recordButton, new LinearLayout.LayoutParams(-1, dp(54)));
+        FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(-1, dp(250));
+        panelLp.gravity = Gravity.BOTTOM;
+        panelLp.leftMargin = dp(10);
+        panelLp.rightMargin = dp(10);
+        panelLp.bottomMargin = dp(108);
+        root.addView(advancedPanel, panelLp);
 
-        root.addView(controls, new LinearLayout.LayoutParams(-1, -2));
-        setContentView(root);
+        // Bottom camera deck.
+        LinearLayout bottom = new LinearLayout(this);
+        bottom.setOrientation(LinearLayout.VERTICAL);
+        bottom.setGravity(Gravity.CENTER_HORIZONTAL);
+        bottom.setPadding(dp(16), dp(8), dp(16), dp(12));
+        bottom.setBackground(gradient(0x00000000, 0xF5000000, false));
+
+        LinearLayout info = new LinearLayout(this);
+        info.setGravity(Gravity.CENTER_VERTICAL);
+        TextView mode = label("录像", 13, 0xFFBDBDBD);
+        mode.setTypeface(null, android.graphics.Typeface.BOLD);
+        info.addView(mode, new LinearLayout.LayoutParams(0, dp(30), 1f));
+        flashValue = label("H.264  •  8 Mbps", 11, 0xFFBDBDBD);
+        flashValue.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        info.addView(flashValue, new LinearLayout.LayoutParams(0, dp(30), 1f));
+        bottom.addView(info);
+
+        recordButton = new Button(this);
+        recordButton.setText("●  开始录像");
+        recordButton.setTextSize(16);
+        recordButton.setTextColor(Color.WHITE);
+        recordButton.setAllCaps(false);
+        recordButton.setBackground(round(0xFFE53935, dp(28)));
+        recordButton.setOnClickListener(v -> toggleRecording());
+        bottom.addView(recordButton, new LinearLayout.LayoutParams(-1, dp(54)));
+        root.addView(bottom, frameBottom());
 
         flipButton.setOnClickListener(v -> {
             if (!recording) {
@@ -186,24 +218,79 @@ public class MainActivity extends AppCompatActivity {
         gridButton.setOnClickListener(v -> {
             gridOn = !gridOn;
             camera.setGrid(gridOn ? Grid.DRAW_3X3 : Grid.OFF);
-            gridButton.setText(gridOn ? "网格开" : "网格关");
+            gridButton.setText(gridOn ? "▦  网格开" : "▦  网格");
         });
+        advancedButton.setOnClickListener(v -> {
+            advancedOpen = !advancedOpen;
+            advancedPanel.setVisibility(advancedOpen ? View.VISIBLE : View.GONE);
+        });
+
+        setContentView(root);
     }
 
-    private Button smallButton(String text) {
+    private LinearLayout.LayoutParams weightChip() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(40), 1f);
+        p.setMargins(dp(3), 0, dp(3), 0);
+        return p;
+    }
+
+    private Button chip(String text) {
         Button b = new Button(this);
         b.setText(text);
         b.setTextSize(12);
+        b.setTextColor(Color.WHITE);
         b.setAllCaps(false);
+        b.setPadding(dp(4), 0, dp(4), 0);
+        b.setBackground(round(0xB51A1C20, dp(22)));
         return b;
     }
 
-    private TextView label(String text, float size) {
+    private TextView parameterHeader(String left, String right) {
+        TextView t = label(left + "   " + right, 10, 0xFF9E9E9E);
+        t.setGravity(Gravity.CENTER_VERTICAL);
+        return t;
+    }
+
+    private SeekBar seek(int max, int progress) {
+        SeekBar s = new SeekBar(this);
+        s.setMax(max);
+        s.setProgress(progress);
+        s.setPadding(dp(4), 0, dp(4), 0);
+        return s;
+    }
+
+    private TextView label(String text, float size, int color) {
         TextView v = new TextView(this);
         v.setText(text);
-        v.setTextColor(0xFFFFFFFF);
+        v.setTextColor(color);
         v.setTextSize(size);
         return v;
+    }
+
+    private android.graphics.drawable.GradientDrawable round(int color, int radius) {
+        android.graphics.drawable.GradientDrawable d = new android.graphics.drawable.GradientDrawable();
+        d.setColor(color);
+        d.setCornerRadius(radius);
+        return d;
+    }
+
+    private android.graphics.drawable.GradientDrawable gradient(int start, int end, boolean top) {
+        android.graphics.drawable.GradientDrawable d = new android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{start, end});
+        return d;
+    }
+
+    private FrameLayout.LayoutParams frameTop() {
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(-1, dp(62));
+        p.gravity = Gravity.TOP;
+        return p;
+    }
+
+    private FrameLayout.LayoutParams frameBottom() {
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(-1, dp(108));
+        p.gravity = Gravity.BOTTOM;
+        return p;
     }
 
     private void configureCamera() {
@@ -225,13 +312,19 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onVideoRecordingStart() {
                 recording = true;
                 runOnUiThread(() -> {
-                    recordButton.setText("停止录像");
-                    status.setText("录像中 · Tint " + (tintBar.getProgress() - 100));
+                    recordButton.setText("■  停止录像");
+                    recordButton.setBackground(round(0xFFB71C1C, dp(28)));
+                    status.setText("● 录像中");
+                    advancedPanel.setVisibility(View.GONE);
                 });
             }
             @Override public void onVideoRecordingEnd() {
                 recording = false;
-                runOnUiThread(() -> recordButton.setText("开始录像"));
+                runOnUiThread(() -> {
+                    recordButton.setText("●  开始录像");
+                    recordButton.setBackground(round(0xFFE53935, dp(28)));
+                    status.setText("正在保存");
+                });
             }
             @Override public void onVideoTaken(@NonNull VideoResult result) {
                 File source = result.getFile();
@@ -245,19 +338,12 @@ public class MainActivity extends AppCompatActivity {
         if (recording) return;
         flashMode = (flashMode + 1) % 3;
         try {
-            if (flashMode == 0) {
-                camera.setFlash(Flash.OFF);
-                flashButton.setText("闪光关");
-            } else if (flashMode == 1) {
-                camera.setFlash(Flash.ON);
-                flashButton.setText("闪光开");
-            } else {
-                camera.setFlash(Flash.AUTO);
-                flashButton.setText("闪光自动");
-            }
+            if (flashMode == 0) { camera.setFlash(Flash.OFF); flashButton.setText("⚡ 关闭"); }
+            else if (flashMode == 1) { camera.setFlash(Flash.ON); flashButton.setText("⚡ 开启"); }
+            else { camera.setFlash(Flash.AUTO); flashButton.setText("⚡ 自动"); }
         } catch (Exception e) {
             flashMode = 0;
-            flashButton.setText("闪光不可用");
+            flashButton.setText("⚡ 不可用");
         }
     }
 
@@ -266,10 +352,8 @@ public class MainActivity extends AppCompatActivity {
             zoom = Math.max(0f, Math.min(1f, zoom + delta));
             camera.setZoom(zoom);
             float display = 1f + zoom * 7f;
-            zoomValue.setText(String.format("%.1f×", display));
-        } catch (Exception e) {
-            status.setText("变焦不可用");
-        }
+            zoomValue.setText(String.format(Locale.US, "%.1f×", display));
+        } catch (Exception e) { status.setText("变焦不可用"); }
     }
 
     private void toggleRecording() {
@@ -277,14 +361,10 @@ public class MainActivity extends AppCompatActivity {
             requestPermissions(new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO}, 100);
             return;
         }
-        if (recording) {
-            camera.stopVideo();
-            return;
-        }
-        pendingVideo = new File(getCacheDir(), "gtneo2_tint_" + System.currentTimeMillis() + ".mp4");
-        try {
-            camera.takeVideoSnapshot(pendingVideo, 10 * 60 * 1000);
-        } catch (Exception e) {
+        if (recording) { camera.stopVideo(); return; }
+        File pendingVideo = new File(getCacheDir(), "gtneo2_tint_" + System.currentTimeMillis() + ".mp4");
+        try { camera.takeVideoSnapshot(pendingVideo, 10 * 60 * 1000); }
+        catch (Exception e) {
             status.setText("录像失败");
             Toast.makeText(this, "录像启动失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
         }
@@ -307,8 +387,7 @@ public class MainActivity extends AppCompatActivity {
                 }
                 Uri uri = getContentResolver().insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
                 if (uri == null) throw new IllegalStateException("无法创建媒体文件");
-                try (FileInputStream in = new FileInputStream(source);
-                     OutputStream out = getContentResolver().openOutputStream(uri)) {
+                try (FileInputStream in = new FileInputStream(source); OutputStream out = getContentResolver().openOutputStream(uri)) {
                     byte[] buffer = new byte[1024 * 64];
                     int n;
                     while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
@@ -320,9 +399,7 @@ public class MainActivity extends AppCompatActivity {
                 }
                 source.delete();
                 runOnUiThread(() -> status.setText("已保存到 Movies/GTNeo2Tint"));
-            } catch (Exception e) {
-                runOnUiThread(() -> status.setText("保存失败：" + e.getMessage()));
-            }
+            } catch (Exception e) { runOnUiThread(() -> status.setText("保存失败：" + e.getMessage())); }
         }).start();
     }
 
@@ -331,7 +408,5 @@ public class MainActivity extends AppCompatActivity {
         if (requestCode == 100 && hasPermissions()) status.setText("权限已允许 · 可以录像");
     }
 
-    private int dp(int value) {
-        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
-    }
+    private int dp(int value) { return (int) (value * getResources().getDisplayMetrics().density + 0.5f); }
 }
