@@ -4,12 +4,8 @@ import android.opengl.GLES20;
 import androidx.annotation.NonNull;
 import com.otaliastudios.cameraview.filter.BaseFilter;
 import com.otaliastudios.cameraview.filter.OneParameterFilter;
-import com.otaliastudios.opengl.core.Egloo;
 
-/**
- * Custom green/magenta tint filter based on CameraView's open-source GL filter architecture.
- * Parameter range used by this app: -1.0 (green) to +1.0 (magenta).
- */
+/** Real-time green/magenta tint filter. App range: -100..+100. */
 public final class TintFilter extends BaseFilter implements OneParameterFilter {
     private static final String FRAGMENT_SHADER =
             "#extension GL_OES_EGL_image_external : require\n" +
@@ -28,43 +24,21 @@ public final class TintFilter extends BaseFilter implements OneParameterFilter {
     private float amount = 0f;
     private int tintLocation = -1;
 
-    @Override
-    public void setParameter1(float value) {
+    @Override public void setParameter1(float value) {
         amount = Math.max(-1f, Math.min(1f, value * 2f - 1f));
     }
+    @Override public float getParameter1() { return (amount + 1f) * 0.5f; }
+    public void setAmount(float value) { amount = Math.max(-1f, Math.min(1f, value)); }
+    @NonNull @Override public String getFragmentShader() { return FRAGMENT_SHADER; }
 
-    @Override
-    public float getParameter1() {
-        return (amount + 1f) * 0.5f;
-    }
-
-    public void setAmount(float value) {
-        amount = Math.max(-1f, Math.min(1f, value));
-    }
-
-    @NonNull
-    @Override
-    public String getFragmentShader() {
-        return FRAGMENT_SHADER;
-    }
-
-    @Override
-    public void onCreate(int programHandle) {
+    @Override public void onCreate(int programHandle) {
         super.onCreate(programHandle);
         tintLocation = GLES20.glGetUniformLocation(programHandle, "tintAmount");
-        Egloo.checkGlProgramLocation(tintLocation, "tintAmount");
+        if (tintLocation < 0) throw new IllegalStateException("Tint uniform not found");
     }
-
-    @Override
-    public void onDestroy() {
-        super.onDestroy();
-        tintLocation = -1;
-    }
-
-    @Override
-    protected void onPreDraw(long timestampUs, @NonNull float[] transformMatrix) {
+    @Override public void onDestroy() { super.onDestroy(); tintLocation = -1; }
+    @Override protected void onPreDraw(long timestampUs, @NonNull float[] transformMatrix) {
         super.onPreDraw(timestampUs, transformMatrix);
         GLES20.glUniform1f(tintLocation, amount);
-        Egloo.checkGlError("glUniform1f tintAmount");
     }
 }
