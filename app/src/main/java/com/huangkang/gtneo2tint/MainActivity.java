@@ -40,6 +40,7 @@ import java.io.OutputStream;
 
 public class MainActivity extends AppCompatActivity {
     private CameraView camera;
+    private ManualExposureController manualExposure;
     private TintFilter tintFilter;
     private SeekBar tintBar, exposureBar, wbBar;
     private TextView tintValue, exposureValue, wbValue, status, zoomValue, recordTime;
@@ -52,6 +53,7 @@ public class MainActivity extends AppCompatActivity {
     private File pendingVideo;
     private int shutterIndex = 1;
     private final String[] shutters = {"1/30", "1/60", "1/120", "1/240"};
+    private final long[] shutterNs = {33_333_333L, 16_666_666L, 8_333_333L, 4_166_666L};
     private int isoIndex = 0;
     private final int[] isos = {100, 200, 400, 800, 1600};
     private int whiteBalanceKelvin = 4000;
@@ -74,6 +76,7 @@ public class MainActivity extends AppCompatActivity {
         root.setBackgroundColor(Color.BLACK);
         camera = new CameraView(this);
         camera.setKeepScreenOn(true);
+        manualExposure = new ManualExposureController(camera);
         root.addView(camera, new FrameLayout.LayoutParams(-1, -1));
 
         LinearLayout top = panel(12, 10, 12, 8);
@@ -181,15 +184,14 @@ public class MainActivity extends AppCompatActivity {
         proPanel.setOrientation(LinearLayout.VERTICAL);
         LinearLayout expHead = new LinearLayout(this);
         expHead.addView(text("曝光补偿", 13, WHITE), weight(0, 30, .7f));
-        exposureValue = text("0.0 EV", 14, ORANGE); exposureValue.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        exposureValue = text("手动传感器", 14, ORANGE); exposureValue.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
         expHead.addView(exposureValue, weight(0, 30, .5f));
         proPanel.addView(expHead);
         exposureBar = slider(); exposureBar.setMax(40); exposureBar.setProgress(20);
         exposureBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             public void onProgressChanged(SeekBar b, int p, boolean u) {
                 float ev = (p - 20) / 10f;
-                try { camera.setExposureCorrection(ev); } catch (Exception ignored) {}
-                exposureValue.setText(String.format("%.1f EV", ev));
+                exposureValue.setText(String.format("手动 · %.1f EV", ev));
             }
             public void onStartTrackingTouch(SeekBar b) {}
             public void onStopTrackingTouch(SeekBar b) {}
@@ -217,7 +219,7 @@ public class MainActivity extends AppCompatActivity {
         bp.setMargins(dp(8), 0, dp(8), dp(8)); root.addView(deck, bp);
         setContentView(root);
 
-        flipButton.setOnClickListener(v -> { if (!recording) { camera.setFacing(camera.getFacing() == Facing.BACK ? Facing.FRONT : Facing.BACK); status.setText(camera.getFacing() == Facing.BACK ? "AF · 后置" : "AF · 前置"); } });
+        flipButton.setOnClickListener(v -> { if (!recording) { camera.setFacing(camera.getFacing() == Facing.BACK ? Facing.FRONT : Facing.BACK); status.setText(camera.getFacing() == Facing.BACK ? "AF · 后置" : "AF · 前置"); manualExposure.applyAfterCameraChanges(); } });
         applyManualExposure();
     }
 
@@ -225,6 +227,7 @@ public class MainActivity extends AppCompatActivity {
         proMode = pro;
         modePro.setTextColor(pro ? ORANGE : WHITE); modeAuto.setTextColor(!pro ? ORANGE : WHITE);
         proPanel.setVisibility(pro ? View.VISIBLE : View.GONE);
+        if (pro) applyManualExposure();
     }
 
     private void cycleShutter() {
@@ -241,13 +244,12 @@ public class MainActivity extends AppCompatActivity {
         applyManualExposure();
     }
 
-    /** CameraView exposes EV rather than raw sensor shutter/ISO. We map the requested pair to an equivalent exposure correction. */
+    /** Uses the real Camera2 SENSOR_EXPOSURE_TIME and SENSOR_SENSITIVITY fields. */
     private void applyManualExposure() {
-        double[] seconds = {1.0/30.0, 1.0/60.0, 1.0/120.0, 1.0/240.0};
-        double ev = Math.log((seconds[shutterIndex] * isos[isoIndex]) / ((1.0/60.0) * 100.0)) / Math.log(2.0);
-        ev = Math.max(-4.0, Math.min(4.0, ev));
-        try { camera.setExposureCorrection((float) ev); } catch (Exception ignored) {}
-        exposureValue.setText(String.format("等效 %.1f EV", ev));
+        if (manualExposure == null) return;
+        manualExposure.setExposureTimeNs(shutterNs[shutterIndex]);
+        manualExposure.setIso(isos[isoIndex]);
+        exposureValue.setText("手动 · " + shutters[shutterIndex] + " · ISO " + isos[isoIndex]);
     }
 
     private void configureCamera() {
@@ -258,7 +260,7 @@ public class MainActivity extends AppCompatActivity {
         camera.setVideoBitRate(8_000_000); camera.setAudioBitRate(128_000); camera.setVideoMaxDuration(10 * 60 * 1000);
         camera.setFilter(tintFilter);
         camera.addCameraListener(new CameraListener() {
-            @Override public void onVideoRecordingStart() { recording = true; runOnUiThread(() -> { recordButton.setText("■  停止录像"); recordButton.setBackground(round(Color.rgb(150,25,25),24)); recordTime.setText("● 录像中"); status.setText("REC · AF"); }); }
+            @Override public void onVideoRecordingStart() { recording = true; manualExposure.applyAfterCameraChanges(); runOnUiThread(() -> { recordButton.setText("■  停止录像"); recordButton.setBackground(round(Color.rgb(150,25,25),24)); recordTime.setText("● 录像中"); status.setText("REC · MANUAL"); }); }
             @Override public void onVideoRecordingEnd() { recording = false; runOnUiThread(() -> { recordButton.setText("●  开始录像"); recordButton.setBackground(round(Color.rgb(190,35,30),24)); recordTime.setText("已停止"); status.setText("AF · 待机"); }); }
             @Override public void onVideoTaken(@NonNull VideoResult result) { File source = result.getFile(); if (source != null && source.exists()) saveToMovies(source); }
         });
@@ -268,6 +270,7 @@ public class MainActivity extends AppCompatActivity {
     private void toggleRecording() {
         if (!hasPermissions()) { requestPermissions(new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO}, 100); return; }
         if (recording) { camera.stopVideo(); return; }
+        applyManualExposure();
         pendingVideo = new File(getCacheDir(), "gtneo2_tint_" + System.currentTimeMillis() + ".mp4");
         try { camera.takeVideoSnapshot(pendingVideo, 10 * 60 * 1000); } catch (Exception e) { Toast.makeText(this, "录像启动失败：" + e.getMessage(), Toast.LENGTH_LONG).show(); }
     }
@@ -280,10 +283,11 @@ public class MainActivity extends AppCompatActivity {
             else if (flashMode == 1) { camera.setFlash(Flash.ON); flashButton.setText("闪光开"); }
             else { camera.setFlash(Flash.AUTO); flashButton.setText("闪光自动"); }
         } catch (Exception e) { flashMode = 0; flashButton.setText("闪光关"); }
+        manualExposure.applyAfterCameraChanges();
     }
 
     private void changeZoom(float d) {
-        try { zoom = Math.max(0f, Math.min(1f, zoom + d)); camera.setZoom(zoom); zoomValue.setText(String.format("%.1f×", 1f + zoom * 7f)); }
+        try { zoom = Math.max(0f, Math.min(1f, zoom + d)); camera.setZoom(zoom); zoomValue.setText(String.format("%.1f×", 1f + zoom * 7f)); manualExposure.applyAfterCameraChanges(); }
         catch (Exception e) { status.setText("变焦不可用"); }
     }
 
