@@ -4,6 +4,7 @@ import android.graphics.SurfaceTexture
 import android.opengl.EGL14
 import android.opengl.EGLExt
 import android.opengl.GLES11Ext
+import android.opengl.GLES20
 import android.opengl.GLES30
 import android.view.Surface
 import java.nio.ByteBuffer
@@ -35,10 +36,10 @@ class CameraGlRenderer(private val onCameraReady: (Surface) -> Unit) : android.o
         val id = IntArray(1)
         GLES30.glGenTextures(1,id,0); textureId=id[0]
         GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,textureId)
-        GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES30.GL_TEXTURE_MIN_FILTER,GLES30.GL_LINEAR)
-        GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES30.GL_TEXTURE_MAG_FILTER,GLES30.GL_LINEAR)
-        GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES30.GL_TEXTURE_WRAP_S,GLES30.GL_CLAMP_TO_EDGE)
-        GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES30.GL_TEXTURE_WRAP_T,GLES30.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MIN_FILTER,GLES20.GL_LINEAR)
+        GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_MAG_FILTER,GLES20.GL_LINEAR)
+        GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_WRAP_S,GLES20.GL_CLAMP_TO_EDGE)
+        GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,GLES20.GL_TEXTURE_WRAP_T,GLES20.GL_CLAMP_TO_EDGE)
         cameraTexture=SurfaceTexture(textureId).also { st ->
             st.setDefaultBufferSize(1920,1080)
             st.setOnFrameAvailableListener { frameAvailable=true; requestRender?.invoke() }
@@ -46,6 +47,10 @@ class CameraGlRenderer(private val onCameraReady: (Surface) -> Unit) : android.o
         cameraSurface=Surface(cameraTexture)
         program=program(VS,FS)
         onCameraReady(cameraSurface!!)
+    }
+
+    override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+        GLES30.glViewport(0,0,width,height)
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -57,11 +62,12 @@ class CameraGlRenderer(private val onCameraReady: (Surface) -> Unit) : android.o
         if(enc!=null){
             if(encoderEgl==EGL14.EGL_NO_SURFACE) encoderEgl=createEncoderSurface(display,enc)
             if(encoderEgl!=EGL14.EGL_NO_SURFACE){
-                EGL14.eglMakeCurrent(display,encoderEgl,encoderEgl,EGL14.eglGetCurrentContext())
+                val ctx=EGL14.eglGetCurrentContext()
+                EGL14.eglMakeCurrent(display,encoderEgl,encoderEgl,ctx)
                 draw()
                 if(timestamp>0) EGLExt.eglPresentationTimeANDROID(display,encoderEgl,timestamp)
                 EGL14.eglSwapBuffers(display,encoderEgl)
-                EGL14.eglMakeCurrent(display,window,window,EGL14.eglGetCurrentContext())
+                EGL14.eglMakeCurrent(display,window,window,ctx)
             }
         }
     }
@@ -80,8 +86,8 @@ class CameraGlRenderer(private val onCameraReady: (Surface) -> Unit) : android.o
     }
 
     private fun createEncoderSurface(display: android.opengl.EGLDisplay, surface: Surface): android.opengl.EGLSurface {
-        val attrs=intArrayOf(EGL14.EGL_RENDERABLE_TYPE,EGL14.EGL_OPENGL_ES3_BIT,EGL14.EGL_RED_SIZE,8,EGL14.EGL_GREEN_SIZE,8,EGL14.EGL_BLUE_SIZE,8,EGL14.EGL_ALPHA_SIZE,8,EGL14.EGL_NONE)
-        val configs=arrayOfNulls<EGLConfig>(1); val n=IntArray(1)
+        val attrs=intArrayOf(EGL14.EGL_RENDERABLE_TYPE,EGL14.EGL_OPENGL_ES2_BIT,EGL14.EGL_RED_SIZE,8,EGL14.EGL_GREEN_SIZE,8,EGL14.EGL_BLUE_SIZE,8,EGL14.EGL_ALPHA_SIZE,8,EGL14.EGL_NONE)
+        val configs=arrayOfNulls<android.opengl.EGLConfig>(1); val n=IntArray(1)
         if(!EGL14.eglChooseConfig(display,attrs,0,configs,0,1,n,0)||configs[0]==null) return EGL14.EGL_NO_SURFACE
         return EGL14.eglCreateWindowSurface(display,configs[0],surface,intArrayOf(EGL14.EGL_NONE),0)
     }
