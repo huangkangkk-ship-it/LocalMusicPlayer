@@ -4,83 +4,105 @@ import android.Manifest
 import android.app.Activity
 import android.content.ContentValues
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.hardware.camera2.*
-import android.hardware.camera2.params.RggbChannelVector
 import android.media.MediaRecorder
-import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
 import android.provider.MediaStore
 import android.view.Surface
-import android.view.TextureView
 import android.widget.*
-import kotlin.math.max
-import kotlin.math.min
+import android.opengl.GLSurfaceView
 
 class MainActivity : Activity() {
-    private lateinit var manager: CameraManager
-    private lateinit var preview: TextureView
-    private var camera: CameraDevice? = null
-    private var session: CameraCaptureSession? = null
-    private var chars: CameraCharacteristics? = null
-    private var recorder: MediaRecorder? = null
-    private var recorderSurface: Surface? = null
-    private var recordingUri: Uri? = null
-    private var recording = false
-    private var iso = 400
-    private var tint = 0
+    private lateinit var glView: GLSurfaceView
+    private lateinit var renderer: CameraGlRenderer
     private lateinit var status: TextView
     private lateinit var recordButton: Button
+    private lateinit var tintLabel: TextView
+    private lateinit var cameraManager: CameraManager
+    private var camera: CameraDevice? = null
+    private var cameraSession: CameraCaptureSession? = null
+    private var recorder: MediaRecorder? = null
+    private var outputPfd: android.os.ParcelFileDescriptor? = null
+    private var outputUri: android.net.Uri? = null
+    private var recording = false
+    private var cameraThread: HandlerThread? = null
+    private var cameraHandler: Handler? = null
 
-    override fun onCreate(state: Bundle?) {
-        super.onCreate(state)
-        setContentView(buildUi())
-        manager = getSystemService(CAMERA_SERVICE) as CameraManager
-        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(Manifest.permission.CAMERA), 7) else openCamera()
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
+        buildUi()
+        startCameraThread()
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(Manifest.permission.CAMERA), 10) else openCamera()
     }
 
-    private fun buildUi(): LinearLayout {
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.BLACK); setPadding(16,16,16,16) }
-        preview = TextureView(this)
-        root.addView(preview, LinearLayout.LayoutParams(-1, 0, 1f))
-        fun text(s: String) = TextView(this).apply { this.text=s; setTextColor(Color.WHITE); textSize=16f }
-        root.addView(text("快门  1/60"))
-        val isoLabel=text("ISO  $iso"); root.addView(isoLabel)
-        root.addView(SeekBar(this).apply { max=3100; progress=iso-100; setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{
-            override fun onProgressChanged(s:SeekBar?,p:Int,f:Boolean){iso=p+100;isoLabel.text="ISO  $iso";applyRequest()}; override fun onStartTrackingTouch(s:SeekBar?){ }; override fun onStopTrackingTouch(s:SeekBar?){ }
-        }) })
-        val tintLabel=text("Tint  $tint"); root.addView(tintLabel)
-        root.addView(SeekBar(this).apply { max=200; progress=100; setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{
-            override fun onProgressChanged(s:SeekBar?,p:Int,f:Boolean){tint=p-100;tintLabel.text="Tint  $tint";applyRequest()}; override fun onStartTrackingTouch(s:SeekBar?){ }; override fun onStopTrackingTouch(s:SeekBar?){ }
-        }) })
-        recordButton=Button(this).apply{text="开始录像";setOnClickListener{if(recording)stopRecording()else startRecording()}};root.addView(recordButton)
-        status=text("Camera2：检测中…");root.addView(status)
-        root.addView(Button(this).apply{text="后置主摄 / 刷新能力";setOnClickListener{checkCapabilities()}})
-        return root
+    private fun buildUi() {
+        val root=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setBackgroundColor(android.graphics.Color.BLACK);setPadding(12,12,12,12)}
+        glView=GLSurfaceView(this)
+        glView.setEGLContextClientVersion(3)
+        renderer=CameraGlRenderer { surface -> runOnUiThread { openCameraWhenReady(surface) } }
+        renderer.requestRender={glView.requestRender()}
+        glView.setRenderer(renderer)
+        glView.renderMode=GLSurfaceView.RENDERMODE_WHEN_DIRTY
+        root.addView(glView,LinearLayout.LayoutParams(-1,0,1f))
+        tintLabel=TextView(this).apply{setTextColor(android.graphics.Color.WHITE);textSize=18f;text="Tint  0"}
+        root.addView(tintLabel)
+        root.addView(SeekBar(this).apply{max=200;progress=100;setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{
+            override fun onProgressChanged(s:SeekBar?,p:Int,fromUser:Boolean){TintController.value=p-100;tintLabel.text="Tint  ${TintController.value}";glView.requestRender();if(recording)status.text="录像中 · Tint ${TintController.value}（Shader 已写入录像）"}
+            override fun onStartTrackingTouch(s:SeekBar?){ }
+            override fun onStopTrackingTouch(s:SeekBar?){ }
+        })})
+        recordButton=Button(this).apply{text="开始录像";setOnClickListener{if(recording)stopRecording()else startRecording()}}
+        root.addView(recordButton)
+        status=TextView(this).apply{setTextColor(android.graphics.Color.WHITE);text="Camera2 + OpenGL ES：初始化中…"}
+        root.addView(status)
+        setContentView(root)
     }
 
-    private fun openCamera(){
-        try{val id=manager.cameraIdList.firstOrNull{manager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING)==CameraCharacteristics.LENS_FACING_BACK}?:return
-            chars=manager.getCameraCharacteristics(id);manager.openCamera(id,object:CameraDevice.StateCallback(){override fun onOpened(c:CameraDevice){camera=c;startPreview()};override fun onDisconnected(c:CameraDevice){c.close()};override fun onError(c:CameraDevice,e:Int){c.close();status.text="相机打开失败：$e"}},null)
-        }catch(e:Exception){status.text="相机错误：${e.message}"}
+    private fun startCameraThread(){cameraThread=HandlerThread("Camera2").also{it.start();cameraHandler=Handler(it.looper)}}
+
+    private fun openCameraWhenReady(surface: Surface){if(camera!=null)return;openCamera(surface)}
+
+    private fun openCamera(surface: Surface?=renderer.cameraSurface()){
+        if(surface==null||camera!=null)return
+        try{
+            val id=cameraManager.cameraIdList.firstOrNull{cameraManager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING)==CameraCharacteristics.LENS_FACING_BACK}?:return
+            if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED)return
+            cameraManager.openCamera(id,object:CameraDevice.StateCallback(){
+                override fun onOpened(c:CameraDevice){camera=c;createSession(surface)}
+                override fun onDisconnected(c:CameraDevice){c.close();camera=null}
+                override fun onError(c:CameraDevice,e:Int){c.close();camera=null;runOnUiThread{status.text="Camera2 错误：$e"}}
+            },cameraHandler)
+        }catch(e:Exception){status.text="打开相机失败：${e.message}"}
     }
 
-    private fun startPreview(){val st=preview.surfaceTexture?:return;st.setDefaultBufferSize(1920,1080);val sf=Surface(st);camera?.createCaptureSession(listOf(sf),object:CameraCaptureSession.StateCallback(){override fun onConfigured(s:CameraCaptureSession){session=s;applyRequest()};override fun onConfigureFailed(s:CameraCaptureSession){status.text="预览配置失败"}},null)}
+    private fun createSession(surface:Surface){
+        camera?.createCaptureSession(listOf(surface),object:CameraCaptureSession.StateCallback(){
+            override fun onConfigured(s:CameraCaptureSession){cameraSession=s;val req=camera!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply{addTarget(surface);set(CaptureRequest.CONTROL_MODE,CameraMetadata.CONTROL_MODE_AUTO);set(CaptureRequest.CONTROL_AWB_MODE,CaptureRequest.CONTROL_AWB_MODE_AUTO)}.build();s.setRepeatingRequest(req,null,cameraHandler);runOnUiThread{status.text="Camera2 + OpenGL ES 已就绪 · Tint 0"}}
+            override fun onConfigureFailed(s:CameraCaptureSession){runOnUiThread{status.text="Camera2 会话配置失败"}}
+        },cameraHandler)
+    }
 
-    private fun tintGains():RggbChannelVector{val t=tint/100f;val rb=1f+0.35f*t;val g=1f-0.35f*t;return RggbChannelVector(max(0.5f,min(1.5f,rb)),max(0.5f,min(1.5f,g)),max(0.5f,min(1.5f,g)),max(0.5f,min(1.5f,rb)))}
+    private fun prepareRecorder():Boolean{
+        val resolver=contentResolver
+        val values=ContentValues().apply{put(MediaStore.Video.Media.DISPLAY_NAME,"GTNeo2_Tint_${System.currentTimeMillis()}.mp4");put(MediaStore.Video.Media.MIME_TYPE,"video/mp4");put(MediaStore.Video.Media.RELATIVE_PATH,"Movies/GTNeo2Tint")}
+        val uri=resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,values)?:return false
+        outputUri=uri
+        val pfd=resolver.openFileDescriptor(uri,"w")?:return false
+        val r=MediaRecorder()
+        r.setVideoSource(MediaRecorder.VideoSource.SURFACE);r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);r.setVideoEncoder(MediaRecorder.VideoEncoder.H264);r.setVideoEncodingBitRate(12_000_000);r.setVideoFrameRate(30);r.setVideoSize(1920,1080);r.setOutputFile(pfd.fileDescriptor)
+        try{r.prepare()}catch(e:Exception){pfd.close();resolver.delete(uri,null,null);r.release();status.text="MediaRecorder 初始化失败：${e.message}";return false}
+        outputPfd=pfd;recorder=r;return true
+    }
 
-    private fun buildRequest(targets:List<Surface>):CaptureRequest{val c=camera?:throw IllegalStateException("camera unavailable");val r=c.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);targets.forEach{r.addTarget(it)};r.set(CaptureRequest.CONTROL_MODE,CameraMetadata.CONTROL_MODE_AUTO);r.set(CaptureRequest.CONTROL_AWB_MODE,CaptureRequest.CONTROL_AWB_MODE_OFF);r.set(CaptureRequest.COLOR_CORRECTION_MODE,CaptureRequest.COLOR_CORRECTION_MODE_FAST);r.set(CaptureRequest.COLOR_CORRECTION_GAINS,tintGains());r.set(CaptureRequest.SENSOR_EXPOSURE_TIME,16_666_667L);r.set(CaptureRequest.SENSOR_SENSITIVITY,iso);return r.build()}
+    private fun startRecording(){if(recording||!prepareRecorder())return;val r=recorder?:return;renderer.setEncoderSurface(r.surface);glView.requestRender();try{r.start();recording=true;recordButton.text="停止录像";status.text="录像中 · Tint ${TintController.value}（OpenGL Shader 已写入录像）"}catch(e:Exception){renderer.setEncoderSurface(null);r.release();recorder=null;outputPfd?.close();outputPfd=null;status.text="开始录像失败：${e.message}"}}
 
-    private fun applyRequest(){val s=session?:return;val ps=Surface(preview.surfaceTexture?:return);val targets=if(recording)listOf(ps,recorderSurface?:return)else listOf(ps);try{s.setRepeatingRequest(buildRequest(targets),null,null)}catch(e:Exception){status.text="参数应用失败：${e.message}"}}
+    private fun stopRecording(){try{recorder?.stop()}catch(_:Exception){};recorder?.reset();recorder?.release();recorder=null;renderer.setEncoderSurface(null);outputPfd?.close();outputPfd=null;recording=false;recordButton.text="开始录像";status.text="录像已保存：${outputUri?.lastPathSegment?:"视频"} · Tint ${TintController.value}";outputUri=null;glView.requestRender()}
 
-    private fun prepareRecorder():Boolean{val resolver=contentResolver;val values=ContentValues().apply{put(MediaStore.Video.Media.DISPLAY_NAME,"GTNeo2_Tint_${System.currentTimeMillis()}.mp4");put(MediaStore.Video.Media.MIME_TYPE,"video/mp4");put(MediaStore.Video.Media.RELATIVE_PATH,"Movies/GTNeo2Tint")};val uri=resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,values)?:return false;recordingUri=uri;val r=MediaRecorder();r.setVideoSource(MediaRecorder.VideoSource.SURFACE);r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);r.setVideoEncodingBitRate(12_000_000);r.setVideoFrameRate(30);r.setVideoSize(1920,1080);r.setVideoEncoder(MediaRecorder.VideoEncoder.H264);val pfd=resolver.openFileDescriptor(uri,"w")?:return false;r.setOutputFile(pfd.fileDescriptor);try{r.prepare()}catch(e:Exception){pfd.close();resolver.delete(uri,null,null);r.release();status.text="录像编码器初始化失败：${e.message}";return false};pfd.close();recorder=r;recorderSurface=r.surface;return true}
-
-    private fun startRecording(){if(camera==null||preview.surfaceTexture==null||!prepareRecorder())return;val ps=Surface(preview.surfaceTexture!!);val vs=recorderSurface?:return;camera?.createCaptureSession(listOf(ps,vs),object:CameraCaptureSession.StateCallback(){override fun onConfigured(s:CameraCaptureSession){session=s;recording=true;try{s.setRepeatingRequest(buildRequest(listOf(ps,vs)),null,null);recorder?.start();recordButton.text="停止录像";status.text="录像中 · Tint $tint（录像输出同步应用）"}catch(e:Exception){recording=false;status.text="开始录像失败：${e.message}";recorder?.release();recorder=null;recorderSurface=null}};override fun onConfigureFailed(s:CameraCaptureSession){status.text="录像会话配置失败";recorder?.release();recorder=null;recorderSurface=null}},null)}
-
-    private fun stopRecording(){try{recorder?.stop()}catch(_:Exception){};recorder?.reset();recorder?.release();recorder=null;recorderSurface=null;recording=false;recordButton.text="开始录像";status.text="录像已保存 · Tint $tint";recordingUri?.let{status.append("\n${it.lastPathSegment?:"视频"}")};recordingUri=null;session?.close();session=null;startPreview()}
-
-    private fun checkCapabilities(){val c=chars?:return;val caps=c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?:intArrayOf();val manual=caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_POST_PROCESSING);val range=c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);status.text="Camera2：MANUAL_POST_PROCESSING=${if(manual)"支持"else"不支持"}\nTint=$tint：${if(manual)"使用 Camera2 RGB Gains"else"设备可能限制色彩矩阵"}\nISO范围=${range?.lower}–${range?.upper}"}
-
-    override fun onRequestPermissionsResult(r:Int,p:Array<out String>,g:IntArray){super.onRequestPermissionsResult(r,p,g);if(r==7&&g.firstOrNull()==PackageManager.PERMISSION_GRANTED)openCamera()}
-    override fun onDestroy(){if(recording)stopRecording();session?.close();camera?.close();super.onDestroy()}
+    override fun onRequestPermissionsResult(requestCode:Int,permissions:Array<out String>,grantResults:IntArray){super.onRequestPermissionsResult(requestCode,permissions,grantResults);if(requestCode==10&&grantResults.firstOrNull()==PackageManager.PERMISSION_GRANTED)openCamera()}
+    override fun onResume(){super.onResume();glView.onResume()}
+    override fun onPause(){if(recording)stopRecording();glView.onPause();super.onPause()}
+    override fun onDestroy(){if(recording)stopRecording();cameraSession?.close();camera?.close();cameraThread?.quitSafely();renderer.release();super.onDestroy()}
 }
